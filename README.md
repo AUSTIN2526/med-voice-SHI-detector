@@ -42,7 +42,6 @@ Refer to the [official PyTorch site](https://pytorch.org/) for other CUDA versio
 #### 📦 Install Whisper
 
 ```bash
-pip install git+https://github.com/nyrahealth/transformers.git@crisper_whisper
 pip install -r requirement.txt
 ```
 
