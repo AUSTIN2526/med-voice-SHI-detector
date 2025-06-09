@@ -19,8 +19,6 @@ def load_dataset(audio_dir, transcript_file, target_sr=16000):
 
     print(f'>>> 共有 {len(raw_data)} 筆紀錄，開始載入並篩選音訊...')
     for record_id_str, record in tqdm(raw_data.items(), desc="載入音訊中", unit="記錄"):
-        if int(record_id_str) > 1000:
-            continue
         try:
             file_id = int(record_id_str)
         except ValueError:

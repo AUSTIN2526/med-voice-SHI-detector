@@ -79,35 +79,62 @@ def build_flat_tokens(words):
             flat.append((tok, idx))
     return flat
 
-
 def align_once(word, search_from, words, flat_tokens, used_pos, replaceable_by_start):
+    """
+    嘗試將一個輸出詞語（phrase）對應回原始文字中的位置區間。
+
+    參數說明：
+    - word: 從模型輸出來的詞語（例如 output 中的某個片語）
+    - search_from: 從第幾個 token 開始搜尋
+    - words: 原始輸入資料中每個字/詞的資訊（含 text、start、end）
+    - flat_tokens: 把所有 words 拆成小寫 tokens 並保留 index，例如 [('hello', 0), ('world', 1)]
+    - used_pos: 已經被比對過的位置集合，避免重複標記
+    - replaceable_by_start: 如果某個開始索引有重疊，可以選擇較長的 span 來替代
+
+    回傳值：
+    若成功比對，回傳 (start_time, end_time, next_search_pos)
+    否則回傳 None
+    """
     search_tokens = tokenize(word)
     if not search_tokens or len(word) < 2:
         return None
+
     m = len(search_tokens)
     N = len(flat_tokens)
     i = search_from
+
     while i <= N - m:
+        # 找第一個 token 對應的位置
         if flat_tokens[i][0] != search_tokens[0]:
             i += 1
             continue
+
+        # 檢查是否整個 token sequence 都符合
         candidate_idxs = [i + k for k in range(m)]
         if any(flat_tokens[idx][0] != search_tokens[k] for k, idx in enumerate(candidate_idxs)):
             i += 1
             continue
+
         start_idx = flat_tokens[candidate_idxs[0]][1]
         end_idx = flat_tokens[candidate_idxs[-1]][1]
+
+        # 如果有重疊的 token，就要處理衝突
         overlap = any(idx in used_pos for idx in candidate_idxs)
         if not overlap:
             used_pos.update(candidate_idxs)
             return words[start_idx]["start"], words[end_idx]["end"], i + 1
+
+        # 嘗試以較長的 span 替代先前的標記
         prev = replaceable_by_start.get(start_idx)
         if prev:
             prev_end_idx, prev_token_indices = prev
             if end_idx > prev_end_idx:
                 used_pos.update(candidate_idxs)
                 used_pos.update(prev_token_indices)
-                replaceable_by_start[start_idx] = (end_idx, list(set(prev_token_indices) | set(candidate_idxs)))
+                replaceable_by_start[start_idx] = (
+                    end_idx,
+                    list(set(prev_token_indices) | set(candidate_idxs))
+                )
                 return words[start_idx]["start"], words[end_idx]["end"], i + 1
         i += 1
     return None
@@ -122,19 +149,21 @@ def process_json(json_path, model, tokenizer, system_prompt, max_window):
     output_pairs = []
 
     if is_chinese(raw_text):
-        # 中文處理：整段處理 + 字元比對
+        # 對中文進行處理
         prompt = f"### PROMPT\n{system_prompt}\n\n### INPUT\n{raw_text}\n\n### OUTPUT\n"
         inp = tokenizer(prompt, return_tensors="pt").to(model.device)
         out_ids = model.generate(**inp, max_new_tokens=300)
         out_text = tokenizer.decode(out_ids[0][inp.input_ids.shape[-1]:], skip_special_tokens=True).strip()
         output_pairs.append((raw_text, out_text))
 
+        # 建立字元對應時間 index
         flat_text = "".join(word["text"] for word in words)
         char_to_idx = []
         for idx, word in enumerate(words):
             for _ in word["text"]:
                 char_to_idx.append(idx)
 
+        # 從 output text 中抓出每一組 phi|word
         if out_text:
             for phi, phrase in parse_output(out_text):
                 for match in re.finditer(re.escape(phrase), flat_text):
@@ -147,7 +176,7 @@ def process_json(json_path, model, tokenizer, system_prompt, max_window):
                         e = words[e_idx]["end"]
                         predictions.append((fid, phi, s, e, phrase))
     else:
-        # 英文處理：句子切分 + sliding windows
+        # 英文處理：用 spaCy 切句並合併短句
         nlp = spacy.load("en_core_web_lg")
         nlp.add_pipe("sentencizer")
         sents = [s.text.strip() for s in nlp(" ".join(word["text"] for word in words)).sents if s.text.strip()]
@@ -162,6 +191,7 @@ def process_json(json_path, model, tokenizer, system_prompt, max_window):
             out_text = tokenizer.decode(out_ids[0][inp.input_ids.shape[-1]:], skip_special_tokens=True).strip()
             output_pairs.append((win, out_text))
 
+            # 對應目前窗口的時間範圍（大致抓）
             toks = tokenize(win)
             if toks:
                 try:
@@ -174,6 +204,7 @@ def process_json(json_path, model, tokenizer, system_prompt, max_window):
             else:
                 ws, we = 0.0, words[-1]["end"]
 
+            # 對 output 逐項比對回時間
             if out_text:
                 for phi, word in parse_output(out_text):
                     sf = 0
@@ -187,15 +218,16 @@ def process_json(json_path, model, tokenizer, system_prompt, max_window):
                         if s >= ws and e <= we:
                             predictions.append((fid, phi, s, e, word))
 
+    # 過濾掉重疊的 span，保留長度較長者
     preds_sorted = sorted(predictions, key=lambda r: (r[3] - r[2]), reverse=True)
     chosen = []
     for rec in preds_sorted:
         _, _, s, e, _ = rec
         if not any(not (e <= cs or s >= ce) for _, _, cs, ce, _ in chosen):
             chosen.append(rec)
+
     predictions = sorted(chosen, key=lambda r: r[2])
     return predictions, output_pairs
-
 
 def write_outputs(fid, output_pairs, cleaned_records, out_dir):
     out_dir.mkdir(parents=True, exist_ok=True)

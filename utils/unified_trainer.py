@@ -6,8 +6,7 @@ from transformers import (
     get_linear_schedule_with_warmup,
     get_cosine_schedule_with_warmup,
 )
-from tqdm import tqdm
-
+from tqdm import tqdm  # 進度條顯示
 
 class UnifiedLoRATrainer:
     def __init__(
@@ -27,6 +26,7 @@ class UnifiedLoRATrainer:
         enable_aug=False,
         enable_spike_detection=False
     ):
+        # 初始化參數與模型
         self.model = model
         self.tokenizer = tokenizer
         self.train_loader = train_loader
@@ -39,13 +39,16 @@ class UnifiedLoRATrainer:
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.model.to(self.device)
 
+        # 計算總訓練步數與 warmup 步數
         total_steps = len(train_loader) * epochs
         warmup_steps = int(warmup_ratio * total_steps)
 
+        # 建立優化器
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(), lr=learning_rate, weight_decay=weight_decay
         )
 
+        # 選擇學習率排程策略
         if scheduler_type == 'cosine':
             self.scheduler = get_cosine_with_hard_restarts_schedule_with_warmup(
                 self.optimizer, warmup_steps, total_steps, num_cycles=cosine_cycles
@@ -59,7 +62,7 @@ class UnifiedLoRATrainer:
                 self.optimizer, warmup_steps, total_steps
             )
 
-        # augmentation schedule if enabled
+        # 設定資料增強（augmentation）強度的排程
         self.aug_schedule = [
             0.0, 0.15, 0.25, 0.35, 0.3, 0.25, 0.2, 0.15, 0.1, 0.05, 0.0, 0.0
         ]
@@ -67,17 +70,20 @@ class UnifiedLoRATrainer:
         self.val_loss_history = []
         self.aug_history = []
 
+    # 根據驗證損失調整資料增強強度
     def _adjust_aug(self, epoch):
         base_intensity = self.aug_schedule[min(epoch, len(self.aug_schedule)-1)]
         if len(self.val_loss_history) >= 2 and self.val_loss_history[-1] > self.val_loss_history[-2]:
             return base_intensity * self.aug_reduction_factor
         return base_intensity
 
+    # 單一訓練 epoch 的流程
     def train_epoch(self, epoch, spike_threshold=0.1):
         self.model.train()
         train_loss = 0.0
         pbar = tqdm(self.train_loader, desc=f'Train Epoch {epoch}')
 
+        # 若啟用資料增強並支援 aug_intensity，調整增強強度
         if self.enable_aug and hasattr(self.train_loader.dataset, 'aug_intensity'):
             intensity = self._adjust_aug(epoch)
             self.train_loader.dataset.aug_intensity = intensity
@@ -89,6 +95,7 @@ class UnifiedLoRATrainer:
             outputs = self.model(**batch)
             loss = outputs.loss
 
+            # 若啟用異常偵測（spike detection）
             if self.enable_spike_detection and loss.item() > spike_threshold / (epoch + 1e-12) and epoch != 0:
                 print(f"\n>>> Spike detected at epoch {epoch} batch {idx}, loss {loss.item():.3f}")
                 if self.tokenizer:
@@ -96,6 +103,7 @@ class UnifiedLoRATrainer:
                     for text in decoded:
                         print(text)
 
+            # 梯度反向傳播與優化
             self.optimizer.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
@@ -108,6 +116,7 @@ class UnifiedLoRATrainer:
 
         return train_loss / len(self.train_loader)
 
+    # 驗證流程
     def validate_epoch(self, epoch):
         self.model.eval()
         val_loss = 0.0
@@ -120,6 +129,7 @@ class UnifiedLoRATrainer:
                 pbar.set_postfix({'loss': f'{outputs.loss.item():.4f}'})
         return val_loss / len(self.valid_loader)
 
+    # 訓練整體流程
     def train(self):
         best_loss = float('inf')
         stop_count = 0
@@ -138,6 +148,7 @@ class UnifiedLoRATrainer:
 
             print(f"Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}")
 
+            # 模型保存與早停（early stopping）策略
             if val_loss < best_loss:
                 best_loss = val_loss
                 stop_count = 0
@@ -155,11 +166,13 @@ class UnifiedLoRATrainer:
         self.plot_history(history)
         return history
 
+    # 畫出訓練歷程圖
     def plot_history(self, history):
         fig, ax = plt.subplots(1, 2 if self.enable_aug else 1, figsize=(12, 5))
         if not isinstance(ax, (list, np.ndarray)):
             ax = [ax]
 
+        # 損失曲線圖
         ax[0].plot(history['train_loss'], label='Train Loss')
         ax[0].plot(history['val_loss'], label='Val Loss')
         ax[0].set_title('Loss Curve')
@@ -168,6 +181,7 @@ class UnifiedLoRATrainer:
         ax[0].legend()
         ax[0].grid(True)
 
+        # 資料增強強度變化圖
         if self.enable_aug:
             ax[1].plot(history['aug_intensity'], label='Aug Intensity', color='green')
             ax[1].set_title('Augmentation Schedule')

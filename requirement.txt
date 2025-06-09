@@ -1,4 +1,5 @@
-sklearn
+git+https://github.com/nyrahealth/transformers.git@crisper_whisper#egg=transformers
+scikit-learn
 spacy
 librosa
 matplotlib

@@ -1,9 +1,9 @@
 import json
 from collections import Counter
 from pathlib import Path
-
 import spacy
 
+# 嘗試載入 spaCy 的大型英文模型，如果尚未安裝則自動下載
 try:
     nlp = spacy.load("en_core_web_lg")
 except OSError:
@@ -11,6 +11,7 @@ except OSError:
     spacy_download("en_core_web_lg")
     nlp = spacy.load("en_core_web_lg")
 
+# 讀取 task1_answer.txt，格式為「ID<TAB>文本內容」
 def read_text_file(path):
     result = {}
     with Path(path).open("r", encoding="utf-8") as fh:
@@ -24,6 +25,7 @@ def read_text_file(path):
     print(f"Loaded {len(result):,} text rows from {Path(path).name}")
     return result
 
+# 讀取 task2_answer.txt，格式為「ID<TAB>phi_type<TAB>...<TAB>phi_content」
 def read_phi_file(path):
     result = {}
     with Path(path).open("r", encoding="utf-8") as fh:
@@ -39,10 +41,12 @@ def read_phi_file(path):
     print(f"Loaded PHI records for {len(result):,} IDs from {Path(path).name}")
     return result
 
+# 將文本依據句子切分，並嘗試將 PHI 條目對應到句子中
 def find_phi_in_sentences(text, phi_items, case_sensitive=True, min_chars=10):
     doc = nlp(text)
     raw_sents = [(s.start_char, s.end_char, s.text) for s in doc.sents]
 
+    # 對短句進行合併以避免斷句影響匹配
     merged = []
     i = 0
     while i < len(raw_sents):
@@ -61,9 +65,11 @@ def find_phi_in_sentences(text, phi_items, case_sensitive=True, min_chars=10):
     phi_not_found = []
     current_offset = 0
 
+    # 判斷是否為單字邊界的輔助函數
     def _is_boundary(ch):
         return not (ch.isalpha() or ch.isdigit())
 
+    # 對每個 PHI 條目進行搜尋
     for phi_index, (phi_type, phi_text) in enumerate(phi_items):
         found_match = None
         needle = phi_text if case_sensitive else phi_text.lower()
@@ -76,6 +82,7 @@ def find_phi_in_sentences(text, phi_items, case_sensitive=True, min_chars=10):
             haystack_full = sent_text[allowed_start_in_sent:]
             haystack = haystack_full if case_sensitive else haystack_full.lower()
 
+            # 搜尋 PHI 字串
             pos = haystack.find(needle)
             while pos != -1:
                 abs_start = sent_start + allowed_start_in_sent + pos
@@ -85,6 +92,7 @@ def find_phi_in_sentences(text, phi_items, case_sensitive=True, min_chars=10):
                 after_i = abs_end - sent_start
                 after = sent_text[after_i] if after_i < len(sent_text) else ""
 
+                # 檢查邊界（避免誤匹配 now → know）
                 left_ok = before == "" or _is_boundary(before)
                 right_ok = after == "" or after in ("'", "’") or _is_boundary(after)
 
@@ -92,6 +100,7 @@ def find_phi_in_sentences(text, phi_items, case_sensitive=True, min_chars=10):
                     pos = haystack.find(needle, pos + 1)
                     continue
 
+                # 找到匹配，記錄位置與相關資訊
                 found_match = {
                     "phi_type": phi_type,
                     "phi_content": phi_text,
@@ -111,6 +120,7 @@ def find_phi_in_sentences(text, phi_items, case_sensitive=True, min_chars=10):
 
     return sentences, sentence_matches, phi_not_found
 
+# 主流程：處理多個文本 ID，分析 PHI 與句子對應情況
 def analyze_phi_locations(text_file, phi_file, target_id=None):
     texts = read_text_file(text_file)
     phis = read_phi_file(phi_file)
@@ -152,12 +162,14 @@ def analyze_phi_locations(text_file, phi_file, target_id=None):
             for item in not_found:
                 not_found_counter[item["phi_type"]] += 1
 
+    # 儲存結果至 JSON 檔案
     out_path = Path("aicup_data/train/sentence_locations.json")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8") as fh:
         json.dump(master, fh, ensure_ascii=False, indent=2)
     print(f"Saved JSON → {out_path.name}")
 
+    # 顯示未匹配結果
     if not_found_summary:
         print("\n未匹配 PHI 摘要:")
         for pid, items in not_found_summary.items():
@@ -165,6 +177,7 @@ def analyze_phi_locations(text_file, phi_file, target_id=None):
             for item in items:
                 print(f"  • {item['phi_type']}: '{item['phi_content']}'")
 
+    # 一致性檢查報告
     if consistency_errors:
         print("\n一致性檢查發現以下問題:")
         for err in consistency_errors:
@@ -174,6 +187,7 @@ def analyze_phi_locations(text_file, phi_file, target_id=None):
 
     return master
 
+# 指令列介面
 if __name__ == "__main__":
     import argparse
 
