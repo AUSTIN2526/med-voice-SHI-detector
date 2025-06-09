@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Qwen inference script with input-output saving in *_results.json"""
+"""Qwen inference with full Chinese support and repeated match handling"""
 
 import argparse
 import json
@@ -18,11 +18,14 @@ pair_re = re.compile(r"\s*、\s*")
 token_re = re.compile(r"\w+")
 punct_table = str.maketrans("", "", string.punctuation)
 
+
+def is_chinese(text):
+    return any('\u4e00' <= c <= '\u9fff' for c in text)
+
+
 def tokenize(text):
     return token_re.findall(text.lower())
 
-def norm(text):
-    return text.lower().translate(punct_table)
 
 def merge_short_sentences(sents, min_chars=20):
     merged = []
@@ -38,6 +41,7 @@ def merge_short_sentences(sents, min_chars=20):
         merged.append(buff)
     return merged
 
+
 def sliding_windows(sents, max_len):
     res = []
     n = len(sents)
@@ -46,7 +50,7 @@ def sliding_windows(sents, max_len):
     for l in range(1, min(max_len, n) + 1):
         res.append(" ".join(sents[0:l]))
     for i in range(1, n - max_len + 1):
-        res.append(" ".join(sents[i : i + max_len]))
+        res.append(" ".join(sents[i: i + max_len]))
     if n >= 2:
         res.append(" ".join(sents[-2:]))
     res.append(sents[-1])
@@ -58,6 +62,7 @@ def sliding_windows(sents, max_len):
             seen.add(w)
     return uniq
 
+
 def parse_output(text):
     pairs = []
     for pair in pair_re.split(text.strip()):
@@ -66,12 +71,14 @@ def parse_output(text):
             pairs.append((phi.strip(), word.strip()))
     return pairs
 
+
 def build_flat_tokens(words):
     flat = []
     for idx, word in enumerate(words):
         for tok in tokenize(word["text"]):
             flat.append((tok, idx))
     return flat
+
 
 def align_once(word, search_from, words, flat_tokens, used_pos, replaceable_by_start):
     search_tokens = tokenize(word)
@@ -105,53 +112,82 @@ def align_once(word, search_from, words, flat_tokens, used_pos, replaceable_by_s
         i += 1
     return None
 
+
 def process_json(json_path, model, tokenizer, system_prompt, max_window):
     data = json.loads(json_path.read_text(encoding="utf-8"))
     words = data["words"]
-    raw_text = " ".join(word["text"] for word in words)
-    nlp = spacy.load("en_core_web_lg")
-    nlp.add_pipe("sentencizer")
-    sents = [s.text.strip() for s in nlp(raw_text).sents if s.text.strip()]
-    sents = merge_short_sentences(sents, min_chars=10)
-    windows = sliding_windows(sents, max_window)
-    flat_tokens = build_flat_tokens(words)
+    raw_text = "".join(word["text"] for word in words)
     fid = json_path.stem
     predictions = []
     output_pairs = []
 
-    for win in windows:
-        prompt = f"### PROMPT\n{system_prompt}\n\n### INPUT\n{win}\n\n### OUTPUT\n"
+    if is_chinese(raw_text):
+        # 中文處理：整段處理 + 字元比對
+        prompt = f"### PROMPT\n{system_prompt}\n\n### INPUT\n{raw_text}\n\n### OUTPUT\n"
         inp = tokenizer(prompt, return_tensors="pt").to(model.device)
-        out_ids = model.generate(**inp, max_new_tokens=100)
+        out_ids = model.generate(**inp, max_new_tokens=300)
         out_text = tokenizer.decode(out_ids[0][inp.input_ids.shape[-1]:], skip_special_tokens=True).strip()
-        output_pairs.append((win, out_text))
+        output_pairs.append((raw_text, out_text))
 
-        toks = tokenize(win)
-        if toks:
-            try:
-                fst = next(i for i, (t, _) in enumerate(flat_tokens) if t == toks[0])
-                lst = max(i for i, (t, _) in enumerate(flat_tokens) if t == toks[-1])
-                ws = words[flat_tokens[fst][1]]["start"]
-                we = words[flat_tokens[lst][1]]["end"]
-            except:
-                ws, we = 0.0, words[-1]["end"]
-        else:
-            ws, we = 0.0, words[-1]["end"]
+        flat_text = "".join(word["text"] for word in words)
+        char_to_idx = []
+        for idx, word in enumerate(words):
+            for _ in word["text"]:
+                char_to_idx.append(idx)
 
         if out_text:
-            for phi, word in parse_output(out_text):
-                sf = 0
-                used = set()
-                rep = {}
-                while True:
-                    span = align_once(word, sf, words, flat_tokens, used, rep)
-                    if not span:
-                        break
-                    s, e, sf = span
-                    if s >= ws and e <= we:
-                        predictions.append((fid, phi, s, e, word))
+            for phi, phrase in parse_output(out_text):
+                for match in re.finditer(re.escape(phrase), flat_text):
+                    start_char = match.start()
+                    end_char = match.end() - 1
+                    if end_char < len(char_to_idx):
+                        s_idx = char_to_idx[start_char]
+                        e_idx = char_to_idx[end_char]
+                        s = words[s_idx]["start"]
+                        e = words[e_idx]["end"]
+                        predictions.append((fid, phi, s, e, phrase))
+    else:
+        # 英文處理：句子切分 + sliding windows
+        nlp = spacy.load("en_core_web_lg")
+        nlp.add_pipe("sentencizer")
+        sents = [s.text.strip() for s in nlp(" ".join(word["text"] for word in words)).sents if s.text.strip()]
+        sents = merge_short_sentences(sents, min_chars=10)
+        windows = sliding_windows(sents, max_window)
+        flat_tokens = build_flat_tokens(words)
 
-    preds_sorted = sorted(predictions, key=lambda r: (r[3]-r[2]), reverse=True)
+        for win in windows:
+            prompt = f"### PROMPT\n{system_prompt}\n\n### INPUT\n{win}\n\n### OUTPUT\n"
+            inp = tokenizer(prompt, return_tensors="pt").to(model.device)
+            out_ids = model.generate(**inp, max_new_tokens=100)
+            out_text = tokenizer.decode(out_ids[0][inp.input_ids.shape[-1]:], skip_special_tokens=True).strip()
+            output_pairs.append((win, out_text))
+
+            toks = tokenize(win)
+            if toks:
+                try:
+                    fst = next(i for i, (t, _) in enumerate(flat_tokens) if t == toks[0])
+                    lst = max(i for i, (t, _) in enumerate(flat_tokens) if t == toks[-1])
+                    ws = words[flat_tokens[fst][1]]["start"]
+                    we = words[flat_tokens[lst][1]]["end"]
+                except:
+                    ws, we = 0.0, words[-1]["end"]
+            else:
+                ws, we = 0.0, words[-1]["end"]
+
+            if out_text:
+                for phi, word in parse_output(out_text):
+                    sf = 0
+                    used = set()
+                    rep = {}
+                    while True:
+                        span = align_once(word, sf, words, flat_tokens, used, rep)
+                        if not span:
+                            break
+                        s, e, sf = span
+                        if s >= ws and e <= we:
+                            predictions.append((fid, phi, s, e, word))
+
+    preds_sorted = sorted(predictions, key=lambda r: (r[3] - r[2]), reverse=True)
     chosen = []
     for rec in preds_sorted:
         _, _, s, e, _ = rec
@@ -159,6 +195,7 @@ def process_json(json_path, model, tokenizer, system_prompt, max_window):
             chosen.append(rec)
     predictions = sorted(chosen, key=lambda r: r[2])
     return predictions, output_pairs
+
 
 def write_outputs(fid, output_pairs, cleaned_records, out_dir):
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -174,6 +211,7 @@ def write_outputs(fid, output_pairs, cleaned_records, out_dir):
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(output_json, f, indent=2, ensure_ascii=False)
 
+
 def load_model(base_model, lora_path, torch_dtype, device):
     tokenizer = AutoTokenizer.from_pretrained(base_model)
     base = AutoModelForCausalLM.from_pretrained(base_model, torch_dtype=torch_dtype, device_map="cpu")
@@ -183,8 +221,9 @@ def load_model(base_model, lora_path, torch_dtype, device):
     model.generation_config.pad_token_id = tokenizer.pad_token_id
     return model, tokenizer
 
+
 def main():
-    parser = argparse.ArgumentParser(description="Qwen inference temporal selection")
+    parser = argparse.ArgumentParser(description="Qwen inference with Chinese support")
     parser.add_argument("json_path")
     parser.add_argument("--output-dir", default="ner_result")
     parser.add_argument("--device", default="cuda")
@@ -195,12 +234,12 @@ def main():
     parser.add_argument("--torch-dtype", default="float16", choices=["float16", "float32", "bfloat16"])
     args = parser.parse_args()
 
-    print("="*60)
+    print("=" * 60)
     print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] 🔧 Loading model...")
     torch_dtype = getattr(torch, args.torch_dtype)
     model, tokenizer = load_model(args.base_model, args.lora_path, torch_dtype, args.device)
     print("✅ Model loaded successfully.")
-    print("="*60)
+    print("=" * 60)
 
     system_prompt = Path(args.system_prompt_file).read_text(encoding="utf-8").strip()
     path = Path(args.json_path)
@@ -215,7 +254,8 @@ def main():
 
     print(f"\n🎉 All {len(files)} file(s) processed.")
     print(f"🗂️  Outputs saved to: {Path(args.output_dir).resolve()}")
-    print("="*60)
+    print("=" * 60)
+
 
 if __name__ == "__main__":
     main()
