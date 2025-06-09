@@ -49,7 +49,7 @@ pip install -r requirement.txt
 #### 📦 Install Qwen
 
 ```bash
-pip install -r qwen_requirement.txt
+pip install -r requirement_qwen.txt
 ```
 
 ---
