@@ -256,7 +256,7 @@ def load_model(base_model, lora_path, torch_dtype, device):
 
 def main():
     parser = argparse.ArgumentParser(description="Qwen inference with Chinese support")
-    parser.add_argument("json_path")
+    parser.add_argument("--json_path", defult="asr_result")
     parser.add_argument("--output-dir", default="ner_result")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--base-model", default="Qwen/Qwen3-14B-Base")
